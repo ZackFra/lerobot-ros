@@ -128,13 +128,21 @@ class SO101ROSConfig(ROS2Config):
 
     action_type: ActionType = ActionType.JOINT_TRAJECTORY
 
-    # With `teleop.type=so101_leader` you MUST set `convert_so101_leader_units=true` or arm commands are
-    # treated as radians and clamp (e.g. -104 “looks like” −104 rad).
+    # With `teleop.type=so101_leader` and default `teleop.use_degrees=true`, arm `.pos` values are **degrees**
+    # (see `SOLeaderConfig` / `SOLeader` in lerobot). Set this true so ROS gets radians. If you set
+    # `teleop.use_degrees=false`, arm joints use normalized −100..100 instead — do not use this flag; you
+    # would need a different mapping to joint angles.
     convert_so101_leader_units: bool = False
     # Leader gripper reading (0–100 style) at the safe visual close; raw <= this → commanded close = 1.0.
     gripper_leader_safe_close_raw: float | None = 6.39
     # Leader reading treated as “fully open” for linear interpolation (open → p=0).
     gripper_leader_open_raw: float = 100.0
+
+    # Optional: apply ``SOFollower.configure()`` over serial before ROS connects. Often fails while
+    # ros2_control holds the same port — then stop the stack and run
+    # ``python -m lerobot_robot_ros.so101_follower_bus_configure <port>`` once.
+    feetech_follower_serial_port: str | None = None
+    feetech_follower_configure_on_connect: bool = False
 
     ros2_interface: ROS2InterfaceConfig = field(
         default_factory=lambda: ROS2InterfaceConfig(
