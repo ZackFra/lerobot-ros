@@ -106,18 +106,50 @@ class AnninAR4Config(ROS2Config):
 @RobotConfig.register_subclass("so101_ros")
 @dataclass
 class SO101ROSConfig(ROS2Config):
-    """Configuration for the ROS 2 version of SO101: https://github.com/Pavankv92/lerobot_ws."""
+    """Configuration for the ROS 2 SO-101: URDF joints match Hugging Face LeRobot (`so101_leader` / `so101_follower`).
+
+    **Gripper “full close” tuning (no guesswork):**
+    1. Drive the gripper in sim until the tips look right (touching, no mesh overlap).
+    2. Read the actual angle:
+       ``ros2 topic echo /joint_states --once``
+       and find ``gripper_joint`` in ``name`` / ``position`` (radians).
+    3. Set ``ros2_interface.gripper_close_position`` to that value (URDF ``lower`` / ros2_control ``min``
+       can be slightly more negative for margin).
+
+    **Why MoveIt doesn’t stop overlap here:** ``lerobot-teleoperate`` → ``so101_ros`` publishes joint
+    trajectories **straight to ros2_control**, not through ``move_group``. No planner runs, so no
+    collision constraints. Also ``so101.srdf`` marks ``gripper``–``jaw`` collisions **disabled**
+    (adjacent links), so even planning often ignores that pair.
+
+    **Leader NORM vs joint_states:** teleop ``gripper.pos`` is LeRobot’s 0–100-style bus normalization,
+    not degrees of ``gripper_joint``. Use ``gripper_leader_safe_close_raw`` to snap “this tight or tighter”
+    to ``gripper_close_position``.
+    """
 
     action_type: ActionType = ActionType.JOINT_TRAJECTORY
 
+    # With `teleop.type=so101_leader` you MUST set `convert_so101_leader_units=true` or arm commands are
+    # treated as radians and clamp (e.g. -104 “looks like” −104 rad).
+    convert_so101_leader_units: bool = False
+    # Leader gripper reading (0–100 style) at the safe visual close; raw <= this → commanded close = 1.0.
+    gripper_leader_safe_close_raw: float | None = 6.39
+    # Leader reading treated as “fully open” for linear interpolation (open → p=0).
+    gripper_leader_open_raw: float = 100.0
+
     ros2_interface: ROS2InterfaceConfig = field(
         default_factory=lambda: ROS2InterfaceConfig(
-            arm_joint_names=["1", "2", "3", "4", "5"],
-            gripper_joint_name="6",
+            arm_joint_names=[
+                "shoulder_pan",
+                "shoulder_lift",
+                "elbow_flex",
+                "wrist_flex",
+                "wrist_roll",
+            ],
+            gripper_joint_name="gripper_joint",
             base_link="base",
-            min_joint_positions=[-1.91986, -1.74533, -1.74533, -1.65806, -2.79253],
-            max_joint_positions=[1.91986, 1.74533, 1.5708, 1.65806, 2.79253],
+            min_joint_positions=[-1.91986, -2.05, -1.74533, -1.65806, -2.79253],
+            max_joint_positions=[1.91986, 1.74533, 1.85, 1.65806, 2.79253],
             gripper_open_position=1.74533,
-            gripper_close_position=0.0,
+            gripper_close_position=-0.191776,
         ),
     )

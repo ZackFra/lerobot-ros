@@ -17,6 +17,7 @@ import threading
 import time
 
 import rclpy
+from builtin_interfaces.msg import Duration
 from control_msgs.action import GripperCommand
 from lerobot.utils.errors import DeviceNotConnectedError
 from rclpy.action import ActionClient
@@ -32,6 +33,11 @@ from .config import ActionType, GripperActionType, ROS2InterfaceConfig
 from .moveit_servo import MoveIt2Servo
 
 logger = logging.getLogger(__name__)
+
+# JointTrajectoryController needs a non-zero segment time to track goals reliably (esp. Gazebo).
+_TRAJ_TIME_250MS = Duration(sec=0, nanosec=250_000_000)
+# Gripper JTC often benefits from a slightly longer segment to settle the last millimetre in Gazebo.
+_GRIPPER_TRAJ_TIME = Duration(sec=0, nanosec=400_000_000)
 
 
 class ROS2Interface:
@@ -152,6 +158,7 @@ class ROS2Interface:
             msg.joint_names = self.config.arm_joint_names
             point = JointTrajectoryPoint()
             point.positions = joint_positions
+            point.time_from_start = _TRAJ_TIME_250MS
             msg.points = [point]
             self.traj_cmd_pub.publish(msg)
         else:
@@ -185,9 +192,10 @@ class ROS2Interface:
             # Map normalized position (0=open, 1=closed) to actual gripper joint position
             open_pos = self.config.gripper_open_position
             closed_pos = self.config.gripper_close_position
-            gripper_goal = open_pos + position * (closed_pos - open_pos)
+            p = max(0.0, min(1.0, float(position)))
+            gripper_goal = open_pos + p * (closed_pos - open_pos)
         else:
-            gripper_goal = position
+            gripper_goal = float(position)
 
         if self.config.gripper_action_type == GripperActionType.TRAJECTORY:
             if self.gripper_traj_pub is None:
@@ -196,6 +204,7 @@ class ROS2Interface:
             msg.joint_names = [self.config.gripper_joint_name]
             point = JointTrajectoryPoint()
             point.positions = [float(gripper_goal)]
+            point.time_from_start = _GRIPPER_TRAJ_TIME
             msg.points = [point]
             self.gripper_traj_pub.publish(msg)
             return True

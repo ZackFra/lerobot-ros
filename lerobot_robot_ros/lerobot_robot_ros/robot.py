@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import math
 import time
 from functools import cached_property
 from typing import Any
@@ -22,7 +23,7 @@ from lerobot.robots import Robot
 from lerobot.robots.utils import ensure_safe_goal_position
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
-from .config import ActionType, ROS2Config
+from .config import ActionType, ROS2Config, SO101ROSConfig
 from .ros_interface import ROS2Interface
 
 logger = logging.getLogger(__name__)
@@ -184,7 +185,27 @@ class ROS2Robot(Robot):
 
 
 class SO101ROS(ROS2Robot):
-    pass
+    def send_action(self, action: dict[str, float]) -> dict[str, float]:
+        if isinstance(self.config, SO101ROSConfig) and self.config.convert_so101_leader_units:
+            action = dict(action)
+            for joint in self.config.ros2_interface.arm_joint_names:
+                key = f"{joint}.pos"
+                action[key] = math.radians(action[key])
+            raw = float(action["gripper.pos"])
+            t = self.config.gripper_leader_safe_close_raw
+            o = self.config.gripper_leader_open_raw
+            if t is not None and o > t:
+                if raw <= t:
+                    p = 1.0
+                elif raw >= o:
+                    p = 0.0
+                else:
+                    p = (o - raw) / (o - t)
+            else:
+                g = max(0.0, min(1.0, raw / 100.0))
+                p = 1.0 - g
+            action["gripper.pos"] = max(0.0, min(1.0, p))
+        return super().send_action(action)
 
 
 class AnninAR4(ROS2Robot):
