@@ -66,6 +66,7 @@ class ROS2Interface:
         self.traj_cmd_pub: Publisher | None = None
         self.gripper_action_client: ActionClient | None = None
         self.gripper_traj_pub: Publisher | None = None
+        self.gripper_pos_cmd_pub: Publisher | None = None
         self.executor: Executor | None = None
         self.moveit2_servo: MoveIt2Servo | None = None
         self.executor_thread: threading.Thread | None = None
@@ -79,7 +80,10 @@ class ROS2Interface:
         self.robot_node = Node("moveit2_interface_node", namespace=self.config.namespace)
         if self.action_type == ActionType.JOINT_POSITION:
             self.pos_cmd_pub = self.robot_node.create_publisher(
-                Float64MultiArray, "/position_controller/commands", 10
+                Float64MultiArray, self.config.arm_commands_topic, 10
+            )
+            self.gripper_pos_cmd_pub = self.robot_node.create_publisher(
+                Float64MultiArray, self.config.gripper_commands_topic, 10
             )
         elif self.action_type == ActionType.JOINT_TRAJECTORY:
             self.traj_cmd_pub = self.robot_node.create_publisher(
@@ -92,7 +96,9 @@ class ROS2Interface:
                 callback_group=ReentrantCallbackGroup(),
             )
 
-        if self.config.gripper_action_type == GripperActionType.TRAJECTORY:
+        if self.action_type == ActionType.JOINT_POSITION:
+            pass  # gripper uses gripper_pos_cmd_pub
+        elif self.config.gripper_action_type == GripperActionType.TRAJECTORY:
             self.gripper_traj_pub = self.robot_node.create_publisher(
                 JointTrajectory, "/gripper_controller/joint_trajectory", 10
             )
@@ -197,6 +203,13 @@ class ROS2Interface:
         else:
             gripper_goal = float(position)
 
+        if self.action_type == ActionType.JOINT_POSITION:
+            if self.gripper_pos_cmd_pub is None:
+                raise DeviceNotConnectedError("Gripper command publisher is not initialized.")
+            msg = Float64MultiArray()
+            msg.data = [float(gripper_goal)]
+            self.gripper_pos_cmd_pub.publish(msg)
+            return True
         if self.config.gripper_action_type == GripperActionType.TRAJECTORY:
             if self.gripper_traj_pub is None:
                 raise DeviceNotConnectedError("Gripper command publisher is not initialized.")

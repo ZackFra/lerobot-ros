@@ -63,6 +63,10 @@ class ROS2InterfaceConfig:
 
     gripper_action_type: GripperActionType = GripperActionType.TRAJECTORY
 
+    # Used with forward_command_controller (hardware); see so101_controllers_hw.yaml.
+    arm_commands_topic: str = "/arm_controller/commands"
+    gripper_commands_topic: str = "/gripper_controller/commands"
+
 
 @dataclass
 class ROS2Config(RobotConfig):
@@ -138,11 +142,8 @@ class SO101ROSConfig(ROS2Config):
     # Leader reading treated as “fully open” for linear interpolation (open → p=0).
     gripper_leader_open_raw: float = 100.0
 
-    # Optional: apply ``SOFollower.configure()`` over serial before ROS connects. Often fails while
-    # ros2_control holds the same port — then stop the stack and run
-    # ``python -m lerobot_robot_ros.so101_follower_bus_configure <port>`` once.
-    feetech_follower_serial_port: str | None = None
-    feetech_follower_configure_on_connect: bool = False
+    # Feetech ``SOFollower.configure()`` runs in ``so101_controller_hw.launch.py`` before ros2_control
+    # opens the USB port (not here — teleop connects after the driver holds the bus).
 
     ros2_interface: ROS2InterfaceConfig = field(
         default_factory=lambda: ROS2InterfaceConfig(

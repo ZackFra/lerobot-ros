@@ -25,7 +25,6 @@ from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnected
 
 from .config import ActionType, ROS2Config, SO101ROSConfig
 from .ros_interface import ROS2Interface
-from .so101_follower_bus_configure import configure_so101_follower_serial
 
 logger = logging.getLogger(__name__)
 
@@ -186,31 +185,6 @@ class ROS2Robot(Robot):
 
 
 class SO101ROS(ROS2Robot):
-    def connect(self, calibrate: bool = True) -> None:
-        if self.is_connected:
-            raise DeviceAlreadyConnectedError(f"{self} already connected")
-
-        cfg = self.config
-        if (
-            isinstance(cfg, SO101ROSConfig)
-            and cfg.feetech_follower_configure_on_connect
-            and cfg.feetech_follower_serial_port
-        ):
-            try:
-                configure_so101_follower_serial(cfg.feetech_follower_serial_port)
-            except Exception as e:
-                logger.warning(
-                    "Feetech follower configure skipped (%s). If ros2_control uses %s, stop the robot "
-                    "launch and run: python -m lerobot_robot_ros.so101_follower_bus_configure %s",
-                    e,
-                    cfg.feetech_follower_serial_port,
-                    cfg.feetech_follower_serial_port,
-                )
-
-        for cam in self.cameras.values():
-            cam.connect()
-        self.ros2_interface.connect()
-
     def send_action(self, action: dict[str, float]) -> dict[str, float]:
         if isinstance(self.config, SO101ROSConfig) and self.config.convert_so101_leader_units:
             action = dict(action)
