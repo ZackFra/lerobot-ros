@@ -22,6 +22,8 @@ class ActionType(Enum):
     CARTESIAN_VELOCITY = "cartesian_velocity"
     JOINT_POSITION = "joint_position"
     JOINT_TRAJECTORY = "joint_trajectory"
+    # Leader joint goals → MoveIt Servo joint jog (requires servo_node in bringup).
+    JOINT_JOG = "joint_jog"
 
 
 class GripperActionType(Enum):
@@ -66,6 +68,17 @@ class ROS2InterfaceConfig:
     # Used with forward_command_controller (hardware); see so101_controllers_hw.yaml.
     arm_commands_topic: str = "/arm_controller/commands"
     gripper_commands_topic: str = "/gripper_controller/commands"
+    # When true (SO-101 HW), gripper uses Float64MultiArray on gripper_commands_topic.
+    gripper_use_forward_commands: bool = False
+
+    # Joint jog (MoveIt Servo unitless): |goal − present| >= this rad → |cmd| = 1.0.
+    # Smaller → "snappier" tracking (servo runs at full speed for small errors).
+    joint_jog_unitless_error_rad: float = 0.02
+    # Per-joint multiplier on error scale (>1 = softer if a joint hunts).
+    joint_jog_joint_error_scale: dict[str, float] = field(default_factory=dict)
+    # EMA on outgoing unitless cmd (1.0 = off; Servo accel smoothing handles smoothness).
+    joint_jog_velocity_filter_alpha: float = 1.0
+    joint_jog_joint_velocity_filter_alpha: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -120,10 +133,10 @@ class SO101ROSConfig(ROS2Config):
     3. Set ``ros2_interface.gripper_close_position`` to that value (URDF ``lower`` / ros2_control ``min``
        can be slightly more negative for margin).
 
-    **Why MoveIt doesn’t stop overlap here:** ``lerobot-teleoperate`` → ``so101_ros`` publishes joint
-    trajectories **straight to ros2_control**, not through ``move_group``. No planner runs, so no
-    collision constraints. Also ``so101.srdf`` marks ``gripper``–``jaw`` collisions **disabled**
-    (adjacent links), so even planning often ignores that pair.
+    **HW teleop (smooth + collision):** ``--robot.action_type=joint_jog`` → MoveIt Servo
+    (``/servo_node/delta_joint_cmds`` → ``/arm_controller/commands``). Use ``command_goal_filter_alpha``
+    and ``max_relative_target`` to soften motion; keep ``servo_node`` from bringup. For direct
+    ros2_control without collision checking, use ``joint_position`` instead.
 
     **Leader NORM vs joint_states:** teleop ``gripper.pos`` is LeRobot’s 0–100-style bus normalization,
     not degrees of ``gripper_joint``. Use ``gripper_leader_safe_close_raw`` to snap “this tight or tighter”
@@ -132,11 +145,23 @@ class SO101ROSConfig(ROS2Config):
 
     action_type: ActionType = ActionType.JOINT_TRAJECTORY
 
+    # Optional EMA on arm goals (rad) before Servo. None = off (recommended; add only if needed).
+    command_goal_filter_alpha: float | None = None
+    # Max rad per arm joint per teleop frame. None = off. Never applied to gripper.pos.
+    max_relative_target: float | None = None
+
     # With `teleop.type=so101_leader` and default `teleop.use_degrees=true`, arm `.pos` values are **degrees**
     # (see `SOLeaderConfig` / `SOLeader` in lerobot). Set this true so ROS gets radians. If you set
     # `teleop.use_degrees=false`, arm joints use normalized −100..100 instead — do not use this flag; you
     # would need a different mapping to joint angles.
-    convert_so101_leader_units: bool = False
+    convert_so101_leader_units: bool = True
+    # When true, follower tracks RELATIVE leader motion from teleop start ("deltas").
+    # When false (default), follower SNAPS to leader's absolute calibrated joint angles.
+    mirror_leader_delta: bool = False
+    # Scale leader delta per joint (e.g. shoulder_lift range vs follower URDF).
+    mirror_leader_joint_delta_scale: dict[str, float] = field(
+        default_factory=lambda: {"shoulder_lift": 1.15}
+    )
     # Leader gripper reading (0–100 style) at the safe visual close; raw <= this → commanded close = 1.0.
     gripper_leader_safe_close_raw: float | None = 6.39
     # Leader reading treated as “fully open” for linear interpolation (open → p=0).
@@ -156,9 +181,19 @@ class SO101ROSConfig(ROS2Config):
             ],
             gripper_joint_name="gripper_joint",
             base_link="base",
-            min_joint_positions=[-1.91986, -2.05, -1.74533, -1.65806, -2.79253],
-            max_joint_positions=[1.91986, 1.74533, 1.85, 1.65806, 2.79253],
+            min_joint_positions=[-1.91986, -2.35, -1.74533, -1.74533, -2.79253],
+            max_joint_positions=[1.91986, 1.74533, 1.85, 1.74533, 2.79253],
             gripper_open_position=1.74533,
             gripper_close_position=-0.191776,
+            gripper_use_forward_commands=True,
+            joint_jog_unitless_error_rad=0.035,
+            joint_jog_velocity_filter_alpha=1.0,
+            joint_jog_joint_error_scale={
+                "shoulder_pan": 1.6,
+                "shoulder_lift": 1.5,
+                "elbow_flex": 1.3,
+                "wrist_flex": 2.0,
+                "wrist_roll": 2.0,
+            },
         ),
     )

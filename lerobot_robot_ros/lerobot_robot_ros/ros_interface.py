@@ -40,6 +40,17 @@ _TRAJ_TIME_250MS = Duration(sec=0, nanosec=250_000_000)
 _GRIPPER_TRAJ_TIME = Duration(sec=0, nanosec=400_000_000)
 
 
+def _clip_joint_positions(
+    joint_positions: list[float],
+    min_positions: list[float],
+    max_positions: list[float],
+) -> list[float]:
+    return [
+        max(lo, min(hi, pos))
+        for pos, lo, hi in zip(joint_positions, min_positions, max_positions, strict=True)
+    ]
+
+
 class ROS2Interface:
     """Class to interface with a MoveIt2 manipulator.
 
@@ -72,11 +83,15 @@ class ROS2Interface:
         self.executor_thread: threading.Thread | None = None
         self.is_connected = False
         self._last_joint_state: dict[str, dict[str, float]] | None = None
+        self._filtered_jog_vel: list[float] | None = None
+        self._leader_joint_step: dict[str, float] = {}
 
     def connect(self) -> None:
         if not rclpy.ok():
             rclpy.init()
 
+        self._filtered_jog_vel = None
+        self._leader_joint_step = {}
         self.robot_node = Node("moveit2_interface_node", namespace=self.config.namespace)
         if self.action_type == ActionType.JOINT_POSITION:
             self.pos_cmd_pub = self.robot_node.create_publisher(
@@ -95,9 +110,24 @@ class ROS2Interface:
                 frame_id=self.config.base_link,
                 callback_group=ReentrantCallbackGroup(),
             )
+        elif self.action_type == ActionType.JOINT_JOG:
+            self.moveit2_servo = MoveIt2Servo(
+                node=self.robot_node,
+                frame_id=self.config.base_link,
+                callback_group=ReentrantCallbackGroup(),
+            )
 
         if self.action_type == ActionType.JOINT_POSITION:
             pass  # gripper uses gripper_pos_cmd_pub
+        elif self.action_type == ActionType.JOINT_JOG:
+            if self.config.gripper_use_forward_commands:
+                self.gripper_pos_cmd_pub = self.robot_node.create_publisher(
+                    Float64MultiArray, self.config.gripper_commands_topic, 10
+                )
+            elif self.config.gripper_action_type == GripperActionType.TRAJECTORY:
+                self.gripper_traj_pub = self.robot_node.create_publisher(
+                    JointTrajectory, "/gripper_controller/joint_trajectory", 10
+                )
         elif self.config.gripper_action_type == GripperActionType.TRAJECTORY:
             self.gripper_traj_pub = self.robot_node.create_publisher(
                 JointTrajectory, "/gripper_controller/joint_trajectory", 10
@@ -125,7 +155,22 @@ class ROS2Interface:
         self.executor_thread.start()
         time.sleep(3)  # Give some time to connect to services and receive messages
 
+        if self.action_type == ActionType.JOINT_JOG and self.moveit2_servo is not None:
+            if not self.moveit2_servo.enable(
+                mode="joint_jog", wait_for_server_timeout_sec=10.0
+            ):
+                logger.error(
+                    "MoveIt Servo joint_jog mode failed to start — "
+                    "check servo_node is running and /servo_node/switch_command_type is available."
+                )
+            else:
+                logger.info("MoveIt Servo joint_jog mode ready.")
+
         self.is_connected = True
+
+    def set_leader_joint_steps(self, steps: dict[str, float]) -> None:
+        """Per-frame leader joint deltas (rad) for open-loop joint jog (e.g. shoulder_pan)."""
+        self._leader_joint_step = steps
 
     def send_joint_position_command(self, joint_positions: list[float], unnormalize: bool = True) -> None:
         """
@@ -142,22 +187,72 @@ class ROS2Interface:
                 raise ValueError(
                     "Joint position normalization requires min and max joint positions to be set."
                 )
-            joint_positions = [
-                min(max(pos, min_pos), max_pos)
-                for pos, min_pos, max_pos in zip(
-                    joint_positions,
-                    self.config.min_joint_positions,
-                    self.config.max_joint_positions,
-                    strict=True,
-                )
-            ]
+            joint_positions = _clip_joint_positions(
+                joint_positions,
+                self.config.min_joint_positions,
+                self.config.max_joint_positions,
+            )
 
         if len(joint_positions) != len(self.config.arm_joint_names):
             raise ValueError(
                 f"Expected {len(self.config.arm_joint_names)} joint positions, but got {len(joint_positions)}."
             )
 
-        if self.action_type == ActionType.JOINT_TRAJECTORY:
+        if self.action_type == ActionType.JOINT_JOG:
+            if self.moveit2_servo is None:
+                raise DeviceNotConnectedError("MoveIt Servo is not initialized.")
+            if self._last_joint_state is None:
+                raise ValueError("Joint state is not available yet.")
+            if (
+                self.config.min_joint_positions is not None
+                and self.config.max_joint_positions is not None
+            ):
+                joint_positions = _clip_joint_positions(
+                    joint_positions,
+                    self.config.min_joint_positions,
+                    self.config.max_joint_positions,
+                )
+            n = len(self.config.arm_joint_names)
+            if self._filtered_jog_vel is None or len(self._filtered_jog_vel) != n:
+                self._filtered_jog_vel = [0.0] * n
+            err_scale = self.config.joint_jog_unitless_error_rad
+            per_joint_err_scale = self.config.joint_jog_joint_error_scale
+            default_alpha = self.config.joint_jog_velocity_filter_alpha
+            per_joint_alpha = self.config.joint_jog_joint_velocity_filter_alpha
+            limit_eps_by_joint = {"shoulder_lift": 0.006}
+            default_limit_eps = 0.003
+            velocities = []
+            for i, (joint, goal) in enumerate(
+                zip(self.config.arm_joint_names, joint_positions, strict=True)
+            ):
+                present = self._last_joint_state["position"].get(joint, 0.0)
+                err = goal - present
+                if (
+                    self.config.min_joint_positions is not None
+                    and self.config.max_joint_positions is not None
+                ):
+                    lo = self.config.min_joint_positions[i]
+                    hi = self.config.max_joint_positions[i]
+                    limit_eps = limit_eps_by_joint.get(joint, default_limit_eps)
+                    if present >= hi - limit_eps and err > 0.0:
+                        err = 0.0
+                    elif present <= lo + limit_eps and err < 0.0:
+                        err = 0.0
+                joint_err_scale = err_scale * per_joint_err_scale.get(joint, 1.0)
+                if joint_err_scale > 0.0:
+                    cmd = max(-1.0, min(1.0, err / joint_err_scale))
+                else:
+                    cmd = 0.0
+                alpha = per_joint_alpha.get(joint, default_alpha)
+                if alpha < 1.0:
+                    cmd = alpha * cmd + (1.0 - alpha) * self._filtered_jog_vel[i]
+                self._filtered_jog_vel[i] = cmd
+                velocities.append(cmd)
+            # Servo must already be in joint_jog mode (enabled at connect).
+            self.moveit2_servo.joint_jog(
+                self.config.arm_joint_names, velocities, enable_if_disabled=False
+            )
+        elif self.action_type == ActionType.JOINT_TRAJECTORY:
             if self.traj_cmd_pub is None:
                 raise DeviceNotConnectedError("Trajectory command publisher is not initialized.")
             msg = JointTrajectory()
@@ -203,7 +298,9 @@ class ROS2Interface:
         else:
             gripper_goal = float(position)
 
-        if self.action_type == ActionType.JOINT_POSITION:
+        if self.action_type == ActionType.JOINT_POSITION or (
+            self.action_type == ActionType.JOINT_JOG and self.gripper_pos_cmd_pub is not None
+        ):
             if self.gripper_pos_cmd_pub is None:
                 raise DeviceNotConnectedError("Gripper command publisher is not initialized.")
             msg = Float64MultiArray()
@@ -287,11 +384,16 @@ class ROS2Interface:
         if self.gripper_traj_pub:
             self.gripper_traj_pub.destroy()
             self.gripper_traj_pub = None
+        if self.gripper_pos_cmd_pub:
+            self.gripper_pos_cmd_pub.destroy()
+            self.gripper_pos_cmd_pub = None
         if self.robot_node:
             self.robot_node.destroy_node()
             self.robot_node = None
         if self.moveit2_servo:
             self.moveit2_servo = None
+        self._filtered_jog_vel = None
+        self._leader_joint_step = {}
 
         if self.executor:
             self.executor.shutdown()
